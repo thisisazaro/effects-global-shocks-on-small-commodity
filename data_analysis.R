@@ -32,7 +32,7 @@ abline(fit, col = "red", lwd = 2)
 ########################################
 
 # группы переменных по факторам
-activity_vars <- c("prod_index", "gdp_world", "macro_un", "monet_un", "kilian_index")
+activity_vars <- c("prod_index", "macro_un", "kilian_index", "fdi", "trade")
 price_vars    <- c("cpi_total", "cpi_oecd", "cpi_g7", "ppi_high_wb", "ppi_upper_mid_wb", "ppi_lower_mid_wb")
 commodity_vars <- c("commodity_price", "energy_price", "agr_price", "fert_price", "metal_price")
 
@@ -139,7 +139,7 @@ print(adf_d2_prices)
 
 # Собираем финальный датафрейм для PCA по ценам
 price_final <- diff_data %>%
-        select(
+        dplyr::select(
                 d2_d_cpi_g7,
                 d2_d_ppi_high_wb,
                 d2_d_ppi_upper_mid_wb,
@@ -149,49 +149,101 @@ price_final <- diff_data %>%
 # Переименование для удобства
 colnames(price_final) <- c("cpi_g7", "ppi_high", "ppi_upper_mid", "ppi_lower_mid")
 
+activity_final <- diff_data %>%
+        dplyr::select(
+                d_prod_index,
+                d_macro_un,
+                d_kilian_index,
+                d_fdi,
+                d_trade
+        )
+
+# Переименование для удобства
+colnames(activity_final) <- c("prod_index", "macro_un", "kilian_index", "fdi", "trade")
+
+commodity_final <- diff_data %>%
+        dplyr::select(
+                d_commodity_price,
+                d_energy_price,
+                d_agr_price,
+                d_fert_price,
+                d_metal_price
+        )
+
+# Переименование для удобства
+colnames(commodity_final) <- c("commodity_price", "energy_price", "agr_price", 
+                           "fert_price", "metal_price")
+
+
+
 ########################################
 # Выполнение PCA для каждой группы
 ########################################
 
-# PCA для Activity (используем все переменные с префиксом "d_")
-activity_pca <- prcomp(activity_diff %>% select(starts_with("d_")), scale. = TRUE)
+# PCA: Глобальная активность
+activity_pca <- prcomp(activity_final, scale. = TRUE)
+factor_activity <- activity_pca$x[, 1] # первый компонент
 summary(activity_pca)
-factor_activity <- activity_pca$x[, 1]  # первый компонент
 
-# PCA для Prices (используем подготовленные переменные)
+# PCA: Цены
 price_pca <- prcomp(price_final, scale. = TRUE)
+factor_price <- price_pca$x[, 1] # первый компонент
 summary(price_pca)
-factor_price <- price_pca$x[, 1]  # первый компонент
 
-# PCA для Commodities (используем все переменные с префиксом "d_")
-commodity_pca <- prcomp(commodity_diff %>% select(starts_with("d_")), scale. = TRUE)
+# PCA: Сырьевые цены
+commodity_pca <- prcomp(commodity_final, scale. = TRUE)
+factor_commodity <- commodity_pca$x[, 1] # первый компонент
 summary(commodity_pca)
-factor_commodity <- commodity_pca$x[, 1]  # первый компонент
+
+
 
 ########################################
 # Собираем итоговый датафрейм с факторами
 ########################################
 
-# Заметим, что:
-# - activity_diff имеет (n-1) наблюдений,
-# - price_final имеет (n-2) наблюдений (так как для цен применяли вторую разность),
-# - commodity_diff имеет (n-1) наблюдений.
-# Поэтому для итогового объединения берем пересечение по наблюдениям.
-
-min_obs <- min(nrow(activity_diff), nrow(price_final), nrow(commodity_diff))
-
-# Приводим факторы к общей длине
 factors_df <- data.frame(
-        date = data$date[(nrow(data) - min_obs + 1):nrow(data)],
-        factor_activity = factor_activity[1:min_obs],
-        factor_price    = factor_price[1:min_obs],
-        factor_commodity = factor_commodity[1:min_obs]
+        date = tail(data$date, length(factor_activity)),
+        factor_activity,
+        factor_price,
+        factor_commodity
 )
 
-head(factors_df)
+library(ggplot2)
+
+# Активность
+ggplot(factors_df, aes(x = date, y = factor_activity)) +
+        geom_line(color = "steelblue") +
+        labs(title = "global activity factor", x = "year", y = "factor")
+
+# Цены
+ggplot(factors_df, aes(x = date, y = factor_price)) +
+        geom_line(color = "darkred") +
+        labs(title = "Price Pressure Factor", x = "Year", y = "Factor")
+
+# Сырьё
+ggplot(factors_df, aes(x = date, y = factor_commodity)) +
+        geom_line(color = "forestgreen") +
+        labs(title = "Commodity Factor", x = "Year", y = "Factor")
 
 
+########################################
+# построим VAR-модель
+########################################
 
+library(vars)
+# VAR по 3 факторам (автоопределение лага по AIC)
+VARselect(factors_df[, -1], lag.max = 10, type = "const")$selection
+
+# Строим модель с выбранным числом лагов (например, 2)
+var_model <- VAR(factors_df[, -1], p = 2, type = "const")
+summary(var_model)
+
+
+# построим IRF (импульсные отклики)
+irf_commodity_shock <- irf(var_model, impulse = "factor_commodity", response = c("factor_activity", "factor_price"),
+                  n.ahead = 12, boot = TRUE)
+
+plot(irf_commodity_shock)
 
 
 
