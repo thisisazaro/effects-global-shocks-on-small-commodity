@@ -33,7 +33,7 @@ abline(fit, col = "red", lwd = 2)
 
 # группы переменных по факторам
 activity_vars <- c("prod_index", "macro_un", "kilian_index", "fdi", "trade")
-price_vars    <- c("cpi_total", "cpi_oecd", "cpi_g7", "ppi_high_wb", "ppi_upper_mid_wb", "ppi_lower_mid_wb")
+price_vars    <- c("median_cpi_wb","median_ppi_wb", "median_deflator_wb","median_core_wb") 
 commodity_vars <- c("commodity_price", "energy_price", "agr_price", "fert_price", "metal_price")
 
 ########################################
@@ -109,45 +109,20 @@ cat("\nADF p-values after differencing — COMMODITIES:\n")
 print(adf_diff_commodities)
 
 
-# Выбираем переменные, у которых p-value > 0.05 после первой разности
-nonstationary_prices <- names(adf_diff_prices[adf_diff_prices > 0.05])
-print(nonstationary_prices)
-
-# Добавим d2_ переменные (вторые разности)
-diff_data <- diff_data %>%
-        mutate(across(all_of(paste0("d_", nonstationary_prices)),
-                      ~ c(NA, diff(.)), .names = "d2_{.col}")) %>%
-        slice(-1)  # ещё один NA в начале
-
-# Проверим стационарность d2_ переменных
-check_stationarity_d2 <- function(df, vars) {
-        sapply(vars, function(var) {
-                varname <- paste0("d2_d_", var)
-                ts_data <- ts(na.omit(df[[varname]]))
-                adf.test(ts_data)$p.value
-        })
-}
-
-adf_d2_prices <- check_stationarity_d2(diff_data, nonstationary_prices)
-
-cat("ADF p-values after 2nd differencing — PRICES:\n")
-print(adf_d2_prices)
-
-
 # Итоговая версия ценовых переменных для PCA
 # Используем только те, которые стали точно стационарными:
 
 # Собираем финальный датафрейм для PCA по ценам
 price_final <- diff_data %>%
         dplyr::select(
-                d2_d_cpi_g7,
-                d2_d_ppi_high_wb,
-                d2_d_ppi_upper_mid_wb,
-                d_ppi_lower_mid_wb
+                d_median_cpi_wb,
+                d_median_ppi_wb,
+                d_median_deflator_wb,
+                d_median_core_wb
         )
 
 # Переименование для удобства
-colnames(price_final) <- c("cpi_g7", "ppi_high", "ppi_upper_mid", "ppi_lower_mid")
+colnames(price_final) <- c("median_cpi_wb", "median_ppi_wb", "median_deflator_wb", "median_core_wb")
 
 activity_final <- diff_data %>%
         dplyr::select(
@@ -196,6 +171,34 @@ factor_commodity <- commodity_pca$x[, 1] # первый компонент
 summary(commodity_pca)
 
 
+# Scree Plot для активности
+plot(activity_pca, type = "l", main = "Scree Plot — Глобальная активность")
+
+# Scree Plot для цен
+plot(price_pca, type = "l", main = "Scree Plot — Цены")
+
+# Scree Plot для сырьевых цен
+plot(commodity_pca, type = "l", main = "Scree Plot — Сырьевые цены")
+
+# Barplot объяснённой дисперсии
+barplot(activity_pca$sdev^2 / sum(activity_pca$sdev^2),
+        main = "PCA — Активность", ylab = "Доля дисперсии", names.arg = paste0("PC", 1:5))
+
+barplot(price_pca$sdev^2 / sum(price_pca$sdev^2),
+        main = "PCA — Цены", ylab = "Доля дисперсии", names.arg = paste0("PC", 1:4))
+
+barplot(commodity_pca$sdev^2 / sum(commodity_pca$sdev^2),
+        main = "PCA — Сырьевые цены", ylab = "Доля дисперсии", names.arg = paste0("PC", 1:5))
+
+# Biplot для активности
+biplot(activity_pca, main = "PCA activity")
+
+# Biplot для цен
+biplot(price_pca, main = "PCA - price")
+
+# Biplot для сырьевых цен
+biplot(commodity_pca, main = "PCA - commodity")
+
 
 ########################################
 # Собираем итоговый датафрейм с факторами
@@ -234,8 +237,8 @@ library(vars)
 # VAR по 3 факторам (автоопределение лага по AIC)
 VARselect(factors_df[, -1], lag.max = 10, type = "const")$selection
 
-# Строим модель с выбранным числом лагов (например, 2)
-var_model <- VAR(factors_df[, -1], p = 2, type = "const")
+# Строим модель с выбранным числом лагов (например, 1)
+var_model <- VAR(factors_df[, -1], p = 1, type = "const")
 summary(var_model)
 
 
@@ -247,7 +250,121 @@ plot(irf_commodity_shock)
 
 
 
+########################################
+# построим SVAR-модель
+########################################
+
+library(vars)
+library(svars)
+
+# VAR с одним лагом — у тебя уже построен как var_model
+# Теперь идентификация SVAR — например, методом Cholesky:
+svar_model <- id.chol(var_model)
+summary(svar_model)
+
+# Историческое разложение
+hd <- hd(svar_model)
+str(hd)
+
+
+########################################
+# historical decomposition
+########################################
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+# Извлекаем data.frame
+df_hd <- hd$hidec
+df_hd
+
+# Переименуем столбцы для удобства
+colnames(df_hd) <- c("time", "demeaned", "constructed", "shock_activity", 
+                     "shock_price", "shock_commodity")
+df_hd$year <- 1972:2024
+
+# Собираем шоки в long-формат
+df_long <- df_hd %>%
+        dplyr::select(time, shock_activity, shock_price, shock_commodity) %>%
+        pivot_longer(-time, names_to = "Shock", values_to = "Contribution") %>%
+        mutate(Shock = recode(Shock,
+                              "shock_activity" = "Global Demand Shock",
+                              "shock_price" = "Global Price Shock",
+                              "shock_commodity" = "Global Commodity Shock"))
+df_long <- df_long %>%
+        left_join(dplyr::select(df_hd, time, year), by = "time")
+
+ggplot() +
+        geom_area(data = df_long, aes(x = year, y = Contribution, fill = Shock), alpha = 0.4) +
+        geom_line(data = df_hd, aes(x = year, y = constructed), linewidth = 1, color = "blue") +
+        facet_wrap(~Shock, scales = "free_y", ncol = 1) +
+        scale_x_continuous(breaks = seq(1972, 2024, by = 5)) +
+        theme_minimal(base_size = 12) +
+        theme(
+                panel.grid.minor = element_blank(),
+                panel.grid.major.y = element_blank(),
+                strip.text = element_text(face = "bold"),
+                axis.text.x = element_text(angle = 0, size = 10),
+                plot.title = element_text(face = "bold", hjust = 0.5)
+        ) +
+        labs(
+                title = "historical decomposition of factor activity",
+                y = "accumulated contribution",
+                x = "year"
+        ) +
+        theme(legend.position = "none")
 
 
 
+# factor_activity (1-я переменная)
+hd_activity <- hd(svar_model, series = 1)$hidec
 
+# factor_price (2-я переменная)
+hd_price <- hd(svar_model, series = 2)$hidec
+
+# factor_commodity (3-я переменная)
+hd_commodity <- hd(svar_model, series = 3)$hidec
+
+
+process_hd <- function(df_hd, var_name) {
+        colnames(df_hd) <- c("time", "demeaned", "constructed", 
+                             "shock_activity", "shock_price", "shock_commodity")
+        df_hd$year <- 1972:2024
+        df_long <- df_hd %>%
+                dplyr::select(time, shock_activity, shock_price, shock_commodity) %>%
+                pivot_longer(-time, names_to = "Shock", values_to = "Contribution") %>%
+                mutate(Shock = recode(Shock,
+                                      "shock_activity" = "Global Demand Shock",
+                                      "shock_price" = "Global Price Shock",
+                                      "shock_commodity" = "Global Commodity Shock")) %>%
+                left_join(dplyr::select(df_hd, time, year, constructed), by = "time") %>%
+                mutate(Variable = var_name)
+        return(df_long)
+}
+
+df_all <- bind_rows(
+        process_hd(hd_activity, "Global Activity"),
+        process_hd(hd_price, "Global Prices"),
+        process_hd(hd_commodity, "Global Commodities")
+)
+
+ggplot(df_all, aes(x = year, y = Contribution, fill = Shock)) +
+        geom_area(alpha = 0.4) +
+        geom_line(aes(y = constructed), color = "blue", linewidth = 1) +
+        facet_grid(Variable ~ Shock, scales = "free_y") +
+        scale_x_continuous(breaks = seq(1972, 2024, by = 5)) +
+        theme_minimal(base_size = 12) +
+        theme(
+                panel.grid.minor = element_blank(),
+                panel.grid.major.y = element_blank(),
+                strip.text = element_text(face = "bold"),
+                axis.text.x = element_text(angle = 0, size = 9),
+                plot.title = element_text(face = "bold", hjust = 0.5)
+        ) +
+        labs(
+                title = "Historical Decomposition of Global Factors 1972-2024",
+                y = "Accumulated Contribution",
+                x = "Year"
+        ) +
+        theme(legend.position = "none")
